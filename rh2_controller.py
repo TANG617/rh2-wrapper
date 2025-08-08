@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+# Tactile sensor is not fully implemented
 import can
 import time
 import struct
