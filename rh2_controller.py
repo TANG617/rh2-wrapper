@@ -3,7 +3,10 @@
 import can
 import time
 import struct
+import logging
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class RH2Controller:
@@ -14,7 +17,7 @@ class RH2Controller:
     
     def __init__(self, interface: str = 'pcan', channel: str = 'PCAN_USBBUS1', 
                  bitrate: int = 1000000, auto_connect: bool = True, 
-                 motor_ids: List[int] = [1, 2, 3]):
+                 motor_ids: List[int] = [1, 2, 3, 4, 5, 6]):
         self.interface = interface
         self.channel = channel
         self.bitrate = bitrate
@@ -40,10 +43,10 @@ class RH2Controller:
             }
             self.bus = can.Bus(**bus_kwargs)
             self.connected = True
-            print(f"CAN总线连接成功: {self.interface}:{self.channel} (标准CAN)")
+            logger.info(f"CAN总线连接成功: {self.interface}:{self.channel}")
             return True
         except Exception as e:
-            print(f"CAN总线连接失败: {e}")
+            logger.error(f"CAN总线连接失败: {e}")
             self.connected = False
             return False
     
@@ -51,7 +54,7 @@ class RH2Controller:
         if self.bus and self.connected:
             self.bus.shutdown()
             self.connected = False
-            print("CAN总线已断开")
+            logger.info("CAN总线已断开")
     
     def is_connected(self) -> bool:
         return self.connected
@@ -59,13 +62,17 @@ class RH2Controller:
     def _validate_motor_ids(self, motor_ids: List[int]) -> bool:
         for motor_id in motor_ids:
             if motor_id not in self.motor_ids:
-                print(f"无效的电机ID: {motor_id}, 有效范围: {self.motor_ids}")
+                logger.warning(f"无效的电机ID: {motor_id}, 有效范围: {self.motor_ids}")
                 return False
         return True
     
     def _send_command(self, command: int, motor_id: int, data_payload: List[int] = None) -> bool:
         if not self.connected:
-            print("CAN总线未连接")
+            logger.error("CAN总线未连接")
+            return False
+
+        if motor_id not in self.motor_ids:
+            logger.warning(f"无效的电机ID: {motor_id}, 有效范围: {self.motor_ids}")
             return False
         
         data = [command]
@@ -85,15 +92,15 @@ class RH2Controller:
             self.bus.send(msg)
             return True
         except can.CanError as e:
-            print(f"发送失败 (电机{motor_id}): {e}")
+            logger.error(f"发送失败 (电机{motor_id}): {e}")
             return False
     
-    def _collect_responses(self, expected_motor_ids: List[int], timeout: float = 1.0) -> Dict[int, Optional[can.Message]]:
+    def _collect_responses(self,  timeout: float = 1.0) -> Dict[int, Optional[can.Message]]:
         results = {}
-        expected_response_ids = {0x100 + motor_id: motor_id for motor_id in expected_motor_ids}
+        expected_response_ids = {0x100 + motor_id: motor_id for motor_id in self.motor_ids}
         
         start_time = time.time()
-        while time.time() - start_time < timeout and len(results) < len(expected_motor_ids):
+        while time.time() - start_time < timeout and len(results) < len(self.motor_ids):
             rx = self.bus.recv(timeout=0.1)
             if rx is None:
                 continue
@@ -102,13 +109,13 @@ class RH2Controller:
             if motor_id is not None and motor_id not in results:
                 results[motor_id] = rx
         
-        for motor_id in expected_motor_ids:
+        for motor_id in self.motor_ids:
             if motor_id not in results:
                 results[motor_id] = None
         
         return results
     
-    def _parse_motor_info_bitfields(self, data: bytes) -> Dict:
+    def _parse_response_bitfields(self, data: bytes) -> Dict:
         raw_uint64 = struct.unpack('<Q', data)[0]
         raw_uint64 >>= 8
         
@@ -156,7 +163,7 @@ class RH2Controller:
         }
         return status_descriptions.get(status_code, f"未知状态码({status_code})")
 
-    def _decode_motor_info_response(self, msg: can.Message, motor_id: int) -> Dict:
+    def _parse_motor_info(self, msg: can.Message, motor_id: int) -> Dict:
         if msg is None or len(msg.data) < 8:
             return {'error': f"电机{motor_id}未收到应答或数据长度不足"}
         
@@ -172,7 +179,7 @@ class RH2Controller:
         
         try:
             if data[0] in [self.COMMAND_READ_MOTOR_INFO, self.COMMAND_CTRL_MOTOR_POSITION]:
-                parsed_fields = self._parse_motor_info_bitfields(data)
+                parsed_fields = self._parse_response_bitfields(data)
                 
                 position = parsed_fields['position']
                 velocity_raw = parsed_fields['velocity']
@@ -211,15 +218,6 @@ class RH2Controller:
                     }
                 })
                 
-                decoded['c_struct_demo'] = {
-                    'description': '对应C结构体MFingerInfo_t的字段',
-                    'P': position,
-                    'V': velocity_raw,
-                    'I': current_raw,
-                    'F': force_sensor,
-                    'status': status
-                }
-                
             else:
                 decoded['error'] = f"意外的指令类型: 0x{data[0]:02X}"
                 
@@ -229,7 +227,7 @@ class RH2Controller:
         
         return decoded
     
-    def _decode_tactile_response(self, msg: can.Message, motor_id: int) -> Dict:
+    def _parse_tactile_info(self, msg: can.Message, motor_id: int) -> Dict:
         if msg is None or len(msg.data) < 8:
             return {'error': f"电机{motor_id}未收到触觉数据应答或数据长度不足"}
         
@@ -260,49 +258,76 @@ class RH2Controller:
         
         return decoded
     
-    def batch_get_motors_info(self, motor_ids: List[int] = None, timeout: float = 1.0) -> Dict[int, Dict]:
-        if motor_ids is None:
-            motor_ids = self.motor_ids
-        
-        if not self._validate_motor_ids(motor_ids):
-            return {}
-        
-        print(f"批量获取电机信息: {motor_ids}")
+    def get_motors_info(self, timeout: float = 1.0) -> Dict[int, Dict]:
+        logger.debug(f"获取所有电机信息: {self.motor_ids}")
         
         success_count = 0
-        for motor_id in motor_ids:
+        for motor_id in self.motor_ids:
             if self._send_command(self.COMMAND_READ_MOTOR_INFO, motor_id):
                 success_count += 1
         
         if success_count == 0:
-            print("所有指令发送失败")
+            logger.error("获取所有电机信息失败")
             return {}
         
-        responses = self._collect_responses(motor_ids, timeout)
+        responses = self._collect_responses(timeout)
         
         results = {}
         for motor_id, msg in responses.items():
-            results[motor_id] = self._decode_motor_info_response(msg, motor_id)
+            results[motor_id] = self._parse_motor_info(msg, motor_id)
+        
+        for motor_id, info in results.items():
+            if 'error' not in info:
+                pos = info.get('current_position', 'N/A')
+                speed = info.get('current_speed', 'N/A')
+                current = info.get('current_current', 'N/A')
+                logger.info(f"电机{motor_id}: 当前位置={pos}, 当前速度={speed}, 当前电流={current}mA")
+            else:
+                logger.error(f"电机{motor_id}: {info['error']}")
         
         return results
-    
-    def batch_move_motors(self, positions: List[int], speeds: List[int], 
-                         current_limits: List[int], motor_ids: List[int] = None, 
+
+    def get_tactile_info(self, frame_numbers: List[int] = [0,1,2,3,4,5], 
+                              timeout: float = 1.0) -> Dict[int, Dict]:
+        logger.debug(f"获取全部触觉数据: {self.motor_ids}")
+        success_count = 0
+        for i, motor_id in enumerate(self.motor_ids):
+            payload = [frame_numbers[i]]
+            if self._send_command(self.COMMAND_READ_TACTILE_DATA, motor_id, payload):
+                success_count += 1
+                logger.debug(f"电机{motor_id}: 帧号={frame_numbers[i]}")
+        
+        if success_count == 0:
+            logger.error("所有触觉数据指令发送失败")
+            return {}
+        
+        responses = self._collect_responses(timeout)
+        
+        results = {}
+        for motor_id, msg in responses.items():
+            results[motor_id] = self._parse_tactile_info(msg, motor_id)
+        
+
+        for tactile_frame_id, info in results.items():
+            if 'error' not in info:
+                tactile_values = info.get('tactile_values', 'N/A')
+                logger.info(f"电机{tactile_frame_id}: 触觉数据={tactile_values}")
+            else:
+                logger.error(f"电机{motor_id}: {info['error']}")
+        
+        return results
+        
+    def move_motors(self, positions: List[int], speeds: List[int], 
+                         current_limits: List[int], 
                          timeout: float = 1.0) -> Dict[int, Dict]:
-        if motor_ids is None:
-            motor_ids = self.motor_ids
         
-        if not self._validate_motor_ids(motor_ids):
-            return {}
+        if not (len(positions) == len(speeds) == len(current_limits) <= len(self.motor_ids)):
+            logger.warning("参数列表长度小于电机数量")
         
-        if not (len(positions) == len(speeds) == len(current_limits) == len(motor_ids)):
-            print("参数列表长度不匹配")
-            return {}
-        
-        print(f"批量移动电机: {motor_ids}")
+        logger.debug(f"批量移动电机: {self.motor_ids}")
         
         success_count = 0
-        for i, motor_id in enumerate(motor_ids):
+        for i, motor_id in enumerate(self.motor_ids):
             payload = [
                 positions[i] & 0xFF,
                 (positions[i] >> 8) & 0xFF,
@@ -315,77 +340,27 @@ class RH2Controller:
             
             if self._send_command(self.COMMAND_CTRL_MOTOR_POSITION, motor_id, payload):
                 success_count += 1
-                print(f"  电机{motor_id}: 位置={positions[i]}, 速度={speeds[i]}, 电流={current_limits[i]}")
         
         if success_count == 0:
-            print("所有位置指令发送失败")
+            logger.error("所有位置指令发送失败")
             return {}
         
-        responses = self._collect_responses(motor_ids, timeout)
+        responses = self._collect_responses(timeout)
         
         results = {}
         for motor_id, msg in responses.items():
-            results[motor_id] = self._decode_motor_info_response(msg, motor_id)
+            results[motor_id] = self._parse_motor_info(msg, motor_id)
         
-        return results
-    
-    def batch_get_tactile_data(self, motor_ids: List[int] = None, 
-                              frame_numbers: List[int] = None, 
-                              timeout: float = 1.0) -> Dict[int, Dict]:
-        if motor_ids is None:
-            motor_ids = self.motor_ids
-        
-        if frame_numbers is None:
-            frame_numbers = [0] * len(motor_ids)
-        
-        if not self._validate_motor_ids(motor_ids):
-            return {}
-        
-        if len(frame_numbers) != len(motor_ids):
-            print("帧号列表长度与电机ID列表长度不匹配")
-            return {}
-        
-        print(f"批量获取触觉数据: {motor_ids}")
-        
-        success_count = 0
-        for i, motor_id in enumerate(motor_ids):
-            payload = [frame_numbers[i]]
-            if self._send_command(self.COMMAND_READ_TACTILE_DATA, motor_id, payload):
-                success_count += 1
-                print(f"  电机{motor_id}: 帧号={frame_numbers[i]}")
-        
-        if success_count == 0:
-            print("所有触觉数据指令发送失败")
-            return {}
-        
-        responses = self._collect_responses(motor_ids, timeout)
-        
-        results = {}
-        for motor_id, msg in responses.items():
-            results[motor_id] = self._decode_tactile_response(msg, motor_id)
-        
-        return results
-    
-    def get_all_positions(self) -> Dict[int, int]:
-        infos = self.batch_get_motors_info()
-        positions = {}
-        for motor_id, info in infos.items():
-            if 'current_position' in info:
-                positions[motor_id] = info['current_position']
+        for motor_id, info in results.items():
+            if 'error' not in info:
+                pos = info.get('current_position', 'N/A')
+                speed = info.get('current_speed', 'N/A')
+                current = info.get('current_current', 'N/A')
+                logger.info(f"电机{motor_id}: 当前位置={pos}, 当前速度={speed}, 当前电流={current}mA")
             else:
-                positions[motor_id] = None
-        return positions
-    
-    def move_all_motors_to_same_position(self, position: int, speed: int = 3000, 
-                                       current_limit: int = 1000) -> Dict[int, Dict]:
-        positions = [position] * len(self.motor_ids)
-        speeds = [speed] * len(self.motor_ids)
-        current_limits = [current_limit] * len(self.motor_ids)
-        return self.batch_move_motors(positions, speeds, current_limits)
-    
-    def get_all_tactile_data(self, frame_number: int = 0) -> Dict[int, Dict]:
-        frame_numbers = [frame_number] * len(self.motor_ids)
-        return self.batch_get_tactile_data(frame_numbers=frame_numbers)
+                logger.error(f"电机{motor_id}: {info['error']}")
+
+        return results
     
     def __enter__(self):
         if not self.connected:
