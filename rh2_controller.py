@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Tactile sensor is not fully implemented
 import can
 import time
 import struct
@@ -43,10 +42,8 @@ class RH2Controller:
             }
             self.bus = can.Bus(**bus_kwargs)
             self.connected = True
-            logger.info(f"CAN总线连接成功: {self.interface}:{self.channel}")
             return True
         except Exception as e:
-            logger.error(f"CAN总线连接失败: {e}")
             self.connected = False
             return False
     
@@ -54,7 +51,6 @@ class RH2Controller:
         if self.bus and self.connected:
             self.bus.shutdown()
             self.connected = False
-            logger.info("CAN总线已断开")
     
     def is_connected(self) -> bool:
         return self.connected
@@ -62,17 +58,14 @@ class RH2Controller:
     def _validate_motor_ids(self, motor_ids: List[int]) -> bool:
         for motor_id in motor_ids:
             if motor_id not in self.motor_ids:
-                logger.warning(f"无效的电机ID: {motor_id}, 有效范围: {self.motor_ids}")
                 return False
         return True
     
     def _send_command(self, command: int, motor_id: int, data_payload: List[int] = None) -> bool:
         if not self.connected:
-            logger.error("CAN总线未连接")
             return False
 
         if motor_id not in self.motor_ids:
-            logger.warning(f"无效的电机ID: {motor_id}, 有效范围: {self.motor_ids}")
             return False
         
         data = [command]
@@ -92,7 +85,6 @@ class RH2Controller:
             self.bus.send(msg)
             return True
         except can.CanError as e:
-            logger.error(f"发送失败 (电机{motor_id}): {e}")
             return False
     
     def _collect_responses(self,  timeout: float = 1.0) -> Dict[int, Optional[can.Message]]:
@@ -228,23 +220,6 @@ class RH2Controller:
         return decoded
   
     def _decode_tactile_sensors(self, frames_data: Dict) -> Dict:
-        """
-        解码触觉传感器数据
-        
-        3帧数据包含总共16字节触觉数据：
-        - 帧0: 6字节
-        - 帧1: 6字节  
-        - 帧2: 4字节
-        
-        8个传感器，每个传感器2字节uint16（小端序）
-        
-        Args:
-            frames_data: 包含所有帧数据的字典
-            
-        Returns:
-            解码后的传感器数据
-        """
-        # 按帧号排序并合并所有触觉数据
         all_tactile_bytes = []
         sorted_frames = sorted(frames_data.items())
         
@@ -252,26 +227,19 @@ class RH2Controller:
             tactile_data = frame_info.get('tactile_data', [])
             all_tactile_bytes.extend(tactile_data)
         
-        logger.debug(f"合并的触觉数据字节: {all_tactile_bytes} (总长度: {len(all_tactile_bytes)})")
-        
-        # 解码8个uint16传感器值（小端序）
         sensors = {}
         if len(all_tactile_bytes) >= 16:
             for i in range(8):
-                # 每个传感器2字节，小端序
                 byte_index = i * 2
                 if byte_index + 1 < len(all_tactile_bytes):
                     low_byte = all_tactile_bytes[byte_index]
                     high_byte = all_tactile_bytes[byte_index + 1]
-                    sensor_value = (high_byte << 8) | low_byte  # 小端序转uint16
+                    sensor_value = (high_byte << 8) | low_byte
                     sensors[f'sensor_{i}'] = {
                         'value': sensor_value,
                         'raw_bytes': [low_byte, high_byte],
                         'byte_index': byte_index
                     }
-                    logger.debug(f"传感器{i}: {low_byte:02x}{high_byte:02x} -> {sensor_value}")
-        else:
-            logger.warning(f"触觉数据不足16字节: {len(all_tactile_bytes)}")
         
         return {
             'sensors': sensors,
@@ -281,15 +249,12 @@ class RH2Controller:
         }
     
     def get_motors_info(self, timeout: float = 1.0) -> Dict[int, Dict]:
-        logger.debug(f"获取所有电机信息: {self.motor_ids}")
-        
         success_count = 0
         for motor_id in self.motor_ids:
             if self._send_command(self.COMMAND_READ_MOTOR_INFO, motor_id):
                 success_count += 1
         
         if success_count == 0:
-            logger.error("获取所有电机信息失败")
             return {}
         
         responses = self._collect_responses(timeout)
@@ -298,65 +263,26 @@ class RH2Controller:
         for motor_id, msg in responses.items():
             results[motor_id] = self._parse_motor_info(msg, motor_id)
         
-        for motor_id, info in results.items():
-            if 'error' not in info:
-                pos = info.get('current_position', 'N/A')
-                speed = info.get('current_speed', 'N/A')
-                current = info.get('current_current', 'N/A')
-                logger.info(f"电机{motor_id}: 当前位置={pos}, 当前速度={speed}, 当前电流={current}mA")
-            else:
-                logger.error(f"电机{motor_id}: {info['error']}")
-        
         return results
 
     def get_tactile_data_frames(self, motor_id: int, timeout: float = 1.0) -> Dict:
-        """
-        使用0xb6指令读取单个电机的多帧触觉数据
-        
-        指令格式：
-        - byte 0: 0xb6 
-        - byte 1[6:0]: 帧号，从0开始递增
-        
-        回复格式：
-        - byte 0: 0xb6
-        - byte 1[7]: 1代表最后一帧
-        - byte 1[6:0]: 帧号
-        - byte 2-7: 触觉数据
-        
-        Args:
-            motor_id: 电机ID
-            timeout: 超时时间（秒）
-            
-        Returns:
-            包含所有帧数据的字典
-        """
         if not self.connected:
-            logger.error("CAN总线未连接")
             return {'error': 'CAN总线未连接'}
             
         if motor_id not in self.motor_ids:
-            logger.error(f"无效的电机ID: {motor_id}")
             return {'error': f'无效的电机ID: {motor_id}'}
-        
-        logger.info(f"开始读取电机{motor_id}的多帧触觉数据")
         
         all_frames = {}
         frame_number = 0
         expected_response_id = 0x100 + motor_id
-        
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            # 发送当前帧号的读取指令
-            payload = [frame_number & 0x7F]  # byte1[6:0]是帧号
+            payload = [frame_number & 0x7F]
             
             if not self._send_command(self.COMMAND_READ_TACTILE_DATA, motor_id, payload):
-                logger.error(f"发送帧{frame_number}读取指令失败")
                 break
-                
-            logger.debug(f"发送读取帧{frame_number}指令到电机{motor_id}")
             
-            # 等待响应
             frame_start_time = time.time()
             frame_timeout = min(0.2, timeout - (time.time() - start_time))
             
@@ -368,18 +294,13 @@ class RH2Controller:
                 if rx.arbitration_id == expected_response_id:
                     data = rx.data
                     
-                    # 验证响应格式 - 对于触觉数据，可能只有6字节而不是8字节
                     if len(data) < 6 or data[0] != self.COMMAND_READ_TACTILE_DATA:
-                        logger.warning(f"无效的响应格式: {[hex(x) for x in data]}")
                         continue
                     
-                    # 解析帧信息
-                    response_frame_number = data[1] & 0x7F  # byte1[6:0]是帧号
-                    is_last_frame = bool(data[1] & 0x80)    # byte1[7]是最后一帧标志
-                    # 触觉数据从byte2开始，长度根据实际数据长度确定
+                    response_frame_number = data[1] & 0x7F
+                    is_last_frame = bool(data[1] & 0x80)
                     tactile_data = list(data[2:]) if len(data) > 2 else []
                     
-                    # 存储帧数据
                     frame_info = {
                         'frame_number': response_frame_number,
                         'is_last_frame': is_last_frame,
@@ -391,13 +312,7 @@ class RH2Controller:
                     
                     all_frames[response_frame_number] = frame_info
                     
-                    logger.info(f"收到帧{response_frame_number}: 触觉数据={tactile_data}, 最后一帧={is_last_frame}")
-                    
-                    # 如果是最后一帧，结束循环
                     if is_last_frame:
-                        logger.info(f"读取完成，共收到{len(all_frames)}帧数据")
-                        
-                        # 解码触觉传感器数据
                         decoded_sensors = self._decode_tactile_sensors(all_frames)
                         
                         return {
@@ -409,18 +324,12 @@ class RH2Controller:
                             'all_raw_data': [frame['raw_data'] for frame in all_frames.values()]
                         }
                     
-                    # 准备读取下一帧
                     frame_number += 1
                     break
             else:
-                logger.warning(f"等待帧{frame_number}超时")
                 break
         
-        # 如果到这里说明超时或出错
         if all_frames:
-            logger.warning(f"部分成功：收到{len(all_frames)}帧数据，但可能未完整")
-            
-            # 即使部分成功，也尝试解码已有的数据
             decoded_sensors = self._decode_tactile_sensors(all_frames)
             
             return {
@@ -433,21 +342,43 @@ class RH2Controller:
                 'all_raw_data': [frame['raw_data'] for frame in all_frames.values()]
             }
         else:
-            logger.error(f"读取电机{motor_id}触觉数据完全失败")
             return {
                 'motor_id': motor_id,
                 'success': False,
                 'error': '未收到任何触觉数据'
             }
+
+    def get_tactile_data(self):
+        tactile_data = {}
         
+        for finger_id in self.motor_ids:
+            try:
+                result = self.get_tactile_data_frames(finger_id, timeout=0.5)
+                
+                if result.get('success') and 'tactile_sensors' in result:
+                    sensors = result['tactile_sensors'].get('sensors', {})
+                    finger_sensors = []
+                    for i in range(8):
+                        sensor_key = f'sensor_{i}'
+                        if sensor_key in sensors:
+                            finger_sensors.append(sensors[sensor_key]['value'])
+                        else:
+                            finger_sensors.append(0)
+                    tactile_data[finger_id] = finger_sensors
+                else:
+                    tactile_data[finger_id] = [0, 0, 0, 0, 0, 0, 0, 0]
+                    
+            except Exception as e:
+                tactile_data[finger_id] = [0, 0, 0, 0, 0, 0, 0, 0]
+        
+        return tactile_data
+ 
     def move_motors(self, positions: List[int], speeds: List[int], 
                          current_limits: List[int], 
                          timeout: float = 1.0) -> Dict[int, Dict]:
         
         if not (len(positions) == len(speeds) == len(current_limits) <= len(self.motor_ids)):
-            logger.warning("参数列表长度小于电机数量")
-        
-        logger.debug(f"批量移动电机: {self.motor_ids}")
+            return {}
         
         success_count = 0
         for i, motor_id in enumerate(self.motor_ids):
@@ -465,7 +396,6 @@ class RH2Controller:
                 success_count += 1
         
         if success_count == 0:
-            logger.error("所有位置指令发送失败")
             return {}
         
         responses = self._collect_responses(timeout)
@@ -473,46 +403,9 @@ class RH2Controller:
         results = {}
         for motor_id, msg in responses.items():
             results[motor_id] = self._parse_motor_info(msg, motor_id)
-        
-        for motor_id, info in results.items():
-            if 'error' not in info:
-                pos = info.get('current_position', 'N/A')
-                speed = info.get('current_speed', 'N/A')
-                current = info.get('current_current', 'N/A')
-                logger.info(f"电机{motor_id}: 当前位置={pos}, 当前速度={speed}, 当前电流={current}mA")
-            else:
-                logger.error(f"电机{motor_id}: {info['error']}")
 
         return results
     
-    def get_finger_sensors(self):
-        """快速读取所有手指的触觉传感器数据"""
-        finger_ids = self.motor_ids
-        finger_data = {}
-        
-        for finger_id in finger_ids:
-            try:
-                result = self.get_tactile_data_frames(finger_id, timeout=0.5)
-                
-                if result.get('success') and 'tactile_sensors' in result:
-                    sensors = result['tactile_sensors'].get('sensors', {})
-                    # 取所有8个传感器
-                    finger_sensors = []
-                    for i in range(8):
-                        sensor_key = f'sensor_{i}'
-                        if sensor_key in sensors:
-                            finger_sensors.append(sensors[sensor_key]['value'])
-                        else:
-                            finger_sensors.append(0)
-                    finger_data[finger_id] = finger_sensors
-                else:
-                    finger_data[finger_id] = [0, 0, 0, 0, 0, 0, 0, 0]  # 默认值
-                    
-            except Exception as e:
-                finger_data[finger_id] = [0, 0, 0, 0, 0, 0, 0, 0]  # 错误时默认值
-        
-        return finger_data
-
 
     def __enter__(self):
         if not self.connected:
