@@ -1,4 +1,8 @@
-from ..rh2_controller import RH2Controller
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from rh2_controller import RH2Controller
+
 import time
 import logging
 

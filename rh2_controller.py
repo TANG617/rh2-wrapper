@@ -316,6 +316,127 @@ class RH2Controller:
                 logger.error(f"电机{motor_id}: {info['error']}")
         
         return results
+
+    def get_tactile_data_frames(self, motor_id: int, timeout: float = 2.0) -> Dict:
+        """
+        使用0xb6指令读取单个电机的多帧触觉数据
+        
+        指令格式：
+        - byte 0: 0xb6 
+        - byte 1[6:0]: 帧号，从0开始递增
+        
+        回复格式：
+        - byte 0: 0xb6
+        - byte 1[7]: 1代表最后一帧
+        - byte 1[6:0]: 帧号
+        - byte 2-7: 触觉数据
+        
+        Args:
+            motor_id: 电机ID
+            timeout: 超时时间（秒）
+            
+        Returns:
+            包含所有帧数据的字典
+        """
+        if not self.connected:
+            logger.error("CAN总线未连接")
+            return {'error': 'CAN总线未连接'}
+            
+        if motor_id not in self.motor_ids:
+            logger.error(f"无效的电机ID: {motor_id}")
+            return {'error': f'无效的电机ID: {motor_id}'}
+        
+        logger.info(f"开始读取电机{motor_id}的多帧触觉数据")
+        
+        all_frames = {}
+        frame_number = 0
+        expected_response_id = 0x100 + motor_id
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            # 发送当前帧号的读取指令
+            payload = [frame_number & 0x7F]  # byte1[6:0]是帧号
+            
+            if not self._send_command(self.COMMAND_READ_TACTILE_DATA, motor_id, payload):
+                logger.error(f"发送帧{frame_number}读取指令失败")
+                break
+                
+            logger.debug(f"发送读取帧{frame_number}指令到电机{motor_id}")
+            
+            # 等待响应
+            frame_start_time = time.time()
+            frame_timeout = min(1.0, timeout - (time.time() - start_time))
+            
+            while time.time() - frame_start_time < frame_timeout:
+                rx = self.bus.recv(timeout=0.1)
+                if rx is None:
+                    continue
+                    
+                if rx.arbitration_id == expected_response_id:
+                    data = rx.data
+                    
+                    # 验证响应格式 - 对于触觉数据，可能只有6字节而不是8字节
+                    if len(data) < 6 or data[0] != self.COMMAND_READ_TACTILE_DATA:
+                        logger.warning(f"无效的响应格式: {[hex(x) for x in data]}")
+                        continue
+                    
+                    # 解析帧信息
+                    response_frame_number = data[1] & 0x7F  # byte1[6:0]是帧号
+                    is_last_frame = bool(data[1] & 0x80)    # byte1[7]是最后一帧标志
+                    # 触觉数据从byte2开始，长度根据实际数据长度确定
+                    tactile_data = list(data[2:]) if len(data) > 2 else []
+                    
+                    # 存储帧数据
+                    frame_info = {
+                        'frame_number': response_frame_number,
+                        'is_last_frame': is_last_frame,
+                        'tactile_data': tactile_data,
+                        'raw_data': [hex(x) for x in data],
+                        'raw_bytes': list(data),
+                        'timestamp': time.time()
+                    }
+                    
+                    all_frames[response_frame_number] = frame_info
+                    
+                    logger.info(f"收到帧{response_frame_number}: 触觉数据={tactile_data}, 最后一帧={is_last_frame}")
+                    
+                    # 如果是最后一帧，结束循环
+                    if is_last_frame:
+                        logger.info(f"读取完成，共收到{len(all_frames)}帧数据")
+                        return {
+                            'motor_id': motor_id,
+                            'total_frames': len(all_frames),
+                            'frames': all_frames,
+                            'success': True,
+                            'all_raw_data': [frame['raw_data'] for frame in all_frames.values()]
+                        }
+                    
+                    # 准备读取下一帧
+                    frame_number += 1
+                    break
+            else:
+                logger.warning(f"等待帧{frame_number}超时")
+                break
+        
+        # 如果到这里说明超时或出错
+        if all_frames:
+            logger.warning(f"部分成功：收到{len(all_frames)}帧数据，但可能未完整")
+            return {
+                'motor_id': motor_id,
+                'total_frames': len(all_frames),
+                'frames': all_frames,
+                'success': False,
+                'error': '数据读取不完整或超时',
+                'all_raw_data': [frame['raw_data'] for frame in all_frames.values()]
+            }
+        else:
+            logger.error(f"读取电机{motor_id}触觉数据完全失败")
+            return {
+                'motor_id': motor_id,
+                'success': False,
+                'error': '未收到任何触觉数据'
+            }
         
     def move_motors(self, positions: List[int], speeds: List[int], 
                          current_limits: List[int], 
