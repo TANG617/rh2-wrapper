@@ -37,11 +37,18 @@ class RH2ControllerManager:
         
         return tactile_data
     
-    def get_all_motor_info(self, timeout: float = 1.0) -> Dict[int, Dict]:
+    def get_all_motor_info(self, timeout: float = 0.3) -> Dict[int, Dict]:
         results = {}
         
+        # 使用较短的超时时间避免阻塞
+        per_motor_timeout = min(timeout / len(self.controllers), 0.1)
+        
         for motor_id, controller in self.controllers.items():
-            results[motor_id] = controller.get_motor_info(timeout)
+            try:
+                results[motor_id] = controller.get_motor_info(per_motor_timeout)
+            except Exception as e:
+                # 如果某个电机超时，不影响其他电机
+                results[motor_id] = {'error': f'通信超时: {e}'}
         
         return results
     
