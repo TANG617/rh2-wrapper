@@ -4,9 +4,9 @@ import time
 import struct
 import logging
 from typing import Dict, List, Optional
+from can_controller import CANController
 
 logger = logging.getLogger(__name__)
-
 
 class RH2Controller:
     
@@ -14,98 +14,28 @@ class RH2Controller:
     COMMAND_CTRL_MOTOR_POSITION = 0xAA
     COMMAND_READ_TACTILE_DATA = 0xB6
     
-    def __init__(self, interface: str = 'pcan', channel: str = 'PCAN_USBBUS1', 
-                 bitrate: int = 1000000, auto_connect: bool = True, 
-                 motor_ids: List[int] = [1, 2, 3, 4, 5, 6]):
-        self.interface = interface
-        self.channel = channel
-        self.bitrate = bitrate
-        self.bus = None
-        self.connected = False
-        self.motor_ids = motor_ids
-        self.response_ids = [0x100 + i for i in self.motor_ids]
+    def __init__(self, motor_id: int, can_controller: CANController):
+        self.motor_id = motor_id
+        self.can_controller = can_controller
+        self.response_id = 0x100 + motor_id
         self.command_names = {
             0xA0: "读取电机信息",
             0xAA: "位置速度电流混合控制", 
             0xB6: "读触觉数据"
         }
-        if auto_connect:
-            self.connect()
-    
-    def connect(self) -> bool:
-        try:
-            bus_kwargs = {
-                "interface": self.interface,
-                "channel": self.channel,
-                "bitrate": self.bitrate,
-                "state": can.BusState.ACTIVE,
-            }
-            self.bus = can.Bus(**bus_kwargs)
-            self.connected = True
-            return True
-        except Exception as e:
-            self.connected = False
-            return False
-    
-    def disconnect(self):
-        if self.bus and self.connected:
-            self.bus.shutdown()
-            self.connected = False
     
     def is_connected(self) -> bool:
-        return self.connected
+        return self.can_controller.is_connected()
     
-    def _validate_motor_ids(self, motor_ids: List[int]) -> bool:
-        for motor_id in motor_ids:
-            if motor_id not in self.motor_ids:
-                return False
-        return True
-    
-    def _send_command(self, command: int, motor_id: int, data_payload: List[int] = None) -> bool:
-        if not self.connected:
-            return False
-
-        if motor_id not in self.motor_ids:
+    def _send_command(self, command: int, data_payload: List[int] = None) -> bool:
+        if not self.is_connected():
             return False
         
         data = [command]
         if data_payload:
             data.extend(data_payload[:7])
         
-        while len(data) < 8:
-            data.append(0x00)
-        
-        msg = can.Message(
-            arbitration_id=motor_id,
-            data=data,
-            is_extended_id=False
-        )
-        
-        try:
-            self.bus.send(msg)
-            return True
-        except can.CanError as e:
-            return False
-    
-    def _collect_responses(self,  timeout: float = 1.0) -> Dict[int, Optional[can.Message]]:
-        results = {}
-        expected_response_ids = {0x100 + motor_id: motor_id for motor_id in self.motor_ids}
-        
-        start_time = time.time()
-        while time.time() - start_time < timeout and len(results) < len(self.motor_ids):
-            rx = self.bus.recv(timeout=0.1)
-            if rx is None:
-                continue
-            
-            motor_id = expected_response_ids.get(rx.arbitration_id)
-            if motor_id is not None and motor_id not in results:
-                results[motor_id] = rx
-        
-        for motor_id in self.motor_ids:
-            if motor_id not in results:
-                results[motor_id] = None
-        
-        return results
+        return self.can_controller.send_message(self.motor_id, data)
     
     def _parse_response_bitfields(self, data: bytes) -> Dict:
         raw_uint64 = struct.unpack('<Q', data)[0]
@@ -155,13 +85,13 @@ class RH2Controller:
         }
         return status_descriptions.get(status_code, f"未知状态码({status_code})")
 
-    def _parse_motor_info(self, msg: can.Message, motor_id: int) -> Dict:
+    def _parse_motor_info(self, msg: can.Message) -> Dict:
         if msg is None or len(msg.data) < 8:
-            return {'error': f"电机{motor_id}未收到应答或数据长度不足"}
+            return {'error': f"电机{self.motor_id}未收到应答或数据长度不足"}
         
         data = msg.data
         decoded = {
-            'motor_id': motor_id,
+            'motor_id': self.motor_id,
             'command_type': hex(data[0]),
             'command_name': self.command_names.get(data[0], f"未知指令({hex(data[0])})"),
             'timestamp': time.time(),
@@ -248,50 +178,38 @@ class RH2Controller:
             'sensor_count': len(sensors)
         }
     
-    def get_motors_info(self, timeout: float = 1.0) -> Dict[int, Dict]:
-        success_count = 0
-        for motor_id in self.motor_ids:
-            if self._send_command(self.COMMAND_READ_MOTOR_INFO, motor_id):
-                success_count += 1
+    def get_motor_info(self, timeout: float = 1.0) -> Dict:
+        if not self._send_command(self.COMMAND_READ_MOTOR_INFO):
+            return {'error': '指令发送失败'}
         
-        if success_count == 0:
-            return {}
+        responses = self.can_controller.collect_responses([self.response_id], timeout)
+        response = responses.get(self.response_id)
         
-        responses = self._collect_responses(timeout)
-        
-        results = {}
-        for motor_id, msg in responses.items():
-            results[motor_id] = self._parse_motor_info(msg, motor_id)
-        
-        return results
+        return self._parse_motor_info(response)
 
-    def get_tactile_data_frames(self, motor_id: int, timeout: float = 1.0) -> Dict:
-        if not self.connected:
+    def get_tactile_data_frames(self, timeout: float = 1.0) -> Dict:
+        if not self.is_connected():
             return {'error': 'CAN总线未连接'}
-            
-        if motor_id not in self.motor_ids:
-            return {'error': f'无效的电机ID: {motor_id}'}
         
         all_frames = {}
         frame_number = 0
-        expected_response_id = 0x100 + motor_id
         start_time = time.time()
         
         while time.time() - start_time < timeout:
             payload = [frame_number & 0x7F]
             
-            if not self._send_command(self.COMMAND_READ_TACTILE_DATA, motor_id, payload):
+            if not self._send_command(self.COMMAND_READ_TACTILE_DATA, payload):
                 break
             
             frame_start_time = time.time()
             frame_timeout = min(0.2, timeout - (time.time() - start_time))
             
             while time.time() - frame_start_time < frame_timeout:
-                rx = self.bus.recv(timeout=0.05)
+                rx = self.can_controller.receive_message(timeout=0.05)
                 if rx is None:
                     continue
                     
-                if rx.arbitration_id == expected_response_id:
+                if rx.arbitration_id == self.response_id:
                     data = rx.data
                     
                     if len(data) < 6 or data[0] != self.COMMAND_READ_TACTILE_DATA:
@@ -316,7 +234,7 @@ class RH2Controller:
                         decoded_sensors = self._decode_tactile_sensors(all_frames)
                         
                         return {
-                            'motor_id': motor_id,
+                            'motor_id': self.motor_id,
                             'total_frames': len(all_frames),
                             'frames': all_frames,
                             'tactile_sensors': decoded_sensors,
@@ -333,7 +251,7 @@ class RH2Controller:
             decoded_sensors = self._decode_tactile_sensors(all_frames)
             
             return {
-                'motor_id': motor_id,
+                'motor_id': self.motor_id,
                 'total_frames': len(all_frames),
                 'frames': all_frames,
                 'tactile_sensors': decoded_sensors,
@@ -343,79 +261,48 @@ class RH2Controller:
             }
         else:
             return {
-                'motor_id': motor_id,
+                'motor_id': self.motor_id,
                 'success': False,
                 'error': '未收到任何触觉数据'
             }
 
-    def get_tactile_data(self):
-        tactile_data = {}
-        
-        for finger_id in self.motor_ids:
-            try:
-                result = self.get_tactile_data_frames(finger_id, timeout=0.5)
-                
-                if result.get('success') and 'tactile_sensors' in result:
-                    sensors = result['tactile_sensors'].get('sensors', {})
-                    finger_sensors = []
-                    for i in range(8):
-                        sensor_key = f'sensor_{i}'
-                        if sensor_key in sensors:
-                            finger_sensors.append(sensors[sensor_key]['value'])
-                        else:
-                            finger_sensors.append(0)
-                    tactile_data[finger_id] = finger_sensors
-                else:
-                    tactile_data[finger_id] = [0, 0, 0, 0, 0, 0, 0, 0]
-                    
-            except Exception as e:
-                tactile_data[finger_id] = [0, 0, 0, 0, 0, 0, 0, 0]
-        
-        return tactile_data
- 
-    def move_motors(self, positions: List[int], speeds: List[int], 
-                         current_limits: List[int], 
-                         timeout: float = 1.0) -> Dict[int, Dict]:
-        
-        if not (len(positions) == len(speeds) == len(current_limits) <= len(self.motor_ids)):
-            return {}
-        
-        success_count = 0
-        for i, motor_id in enumerate(self.motor_ids):
-            payload = [
-                positions[i] & 0xFF,
-                (positions[i] >> 8) & 0xFF,
-                speeds[i] & 0xFF,
-                (speeds[i] >> 8) & 0xFF,
-                current_limits[i] & 0xFF,
-                (current_limits[i] >> 8) & 0xFF,
-                0x00
-            ]
+    def get_tactile_data(self, timeout: float = 0.5) -> List[int]:
+        try:
+            result = self.get_tactile_data_frames(timeout)
             
-            if self._send_command(self.COMMAND_CTRL_MOTOR_POSITION, motor_id, payload):
-                success_count += 1
+            if result.get('success') and 'tactile_sensors' in result:
+                sensors = result['tactile_sensors'].get('sensors', {})
+                finger_sensors = []
+                for i in range(8):
+                    sensor_key = f'sensor_{i}'
+                    if sensor_key in sensors:
+                        finger_sensors.append(sensors[sensor_key]['value'])
+                    else:
+                        finger_sensors.append(0)
+                return finger_sensors
+            else:
+                return [0, 0, 0, 0, 0, 0, 0, 0]
+                
+        except Exception as e:
+            return [0, 0, 0, 0, 0, 0, 0, 0]
+ 
+    def move_motor(self, position: int, speed: int, current_limit: int, timeout: float = 1.0) -> Dict:
+        payload = [
+            position & 0xFF,
+            (position >> 8) & 0xFF,
+            speed & 0xFF,
+            (speed >> 8) & 0xFF,
+            current_limit & 0xFF,
+            (current_limit >> 8) & 0xFF,
+            0x00
+        ]
         
-        if success_count == 0:
-            return {}
+        if not self._send_command(self.COMMAND_CTRL_MOTOR_POSITION, payload):
+            return {'error': '指令发送失败'}
         
-        responses = self._collect_responses(timeout)
+        responses = self.can_controller.collect_responses([self.response_id], timeout)
+        response = responses.get(self.response_id)
         
-        results = {}
-        for motor_id, msg in responses.items():
-            results[motor_id] = self._parse_motor_info(msg, motor_id)
-
-        return results
-    
-
-    def __enter__(self):
-        if not self.connected:
-            self.connect()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.disconnect()
-    
-    def __del__(self):
-        self.disconnect()
+        return self._parse_motor_info(response)
 
 

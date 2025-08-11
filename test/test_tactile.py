@@ -1,12 +1,13 @@
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rh2_controller import RH2Controller
+from rh2_manager import RH2ControllerManager
+from can_controller import CANController
 
 import time
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.ERROR)
 
 
 def display_finger_sensors(finger_data):
@@ -25,22 +26,25 @@ def display_finger_sensors(finger_data):
         print(f"手指{finger_id}  |  {sensor_str}")
 
 def test_tactile():
-    controller = RH2Controller(motor_ids=[2, 3, 4, 5, 6])
     
-    if not controller.is_connected():
+    can_controller = CANController(interface='pcan', channel='PCAN_USBBUS1', bitrate=1000000)
+    
+    manager = RH2ControllerManager(can_controller=can_controller, motor_ids=[2, 3, 4, 5, 6])
+    
+    if not manager.is_connected():
         print("连接失败，退出测试")
         return
     
     try:
         while True:
-            finger_data = controller.get_tactile_data()
+            finger_data = manager.get_tactile_data()
             display_finger_sensors(finger_data)
             time.sleep(0.1)
             
     except KeyboardInterrupt:
         print("\n\n程序结束")
     finally:
-        controller.disconnect()
+        manager.disconnect()
 
 if __name__ == "__main__":
     test_tactile()
