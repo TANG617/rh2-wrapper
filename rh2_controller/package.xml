@@ -4,14 +4,14 @@
   <name>rh2_controller</name>
   <version>1.0.0</version>
   <description>ROS2 wrapper for RH2 robotic hand controller</description>
-  <maintainer email="your.email@example.com">Your Name</maintainer>
+  <maintainer email="litang0617@outlook.com">LiTang</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
-  
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

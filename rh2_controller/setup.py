@@ -21,9 +21,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'rh2_controller_node = rh2_controller.rh2_ros_wrapper:main',
             'rh2_dual_hand_node = rh2_controller.rh2_node:main',
-            'rh2_test_client = rh2_controller.test_client:main',
         ],
     },
 )
