@@ -10,7 +10,7 @@ import json
 import time
 import logging
 from typing import Dict, List
-from rh2_controller import RH2Controller
+from .rh2_controller import RH2Controller
 
 # 自定义消息类型 (简化版，使用标准消息)
 class RH2ControlCommand:
@@ -46,8 +46,8 @@ class RH2ROSWrapper(Node):
     """
     
     def __init__(self, 
-                 interface: str = 'pcan', 
-                 channel: str = 'PCAN_USBBUS1',
+                 interface: str = 'socketcan', 
+                 channel: str = 'can0',
                  bitrate: int = 1000000,
                  motor_ids: List[int] = [1, 2, 3, 4, 5, 6],
                  hand_name: str = 'right',
@@ -319,7 +319,7 @@ def create_command_message(command_type: str, positions: List[int] = None,
         JointState消息
     """
     msg = JointState()
-    msg.header.stamp = rclpy.time.Time().to_msg()
+    # Note: This should be called from within a Node context to get proper timestamp
     msg.header.frame_id = "rh2_command"
     
     msg.name = [command_type]
@@ -349,8 +349,8 @@ def main(args=None):
     try:
         # 创建RH2 ROS包装器节点
         rh2_wrapper = RH2ROSWrapper(
-            interface='pcan',
-            channel='PCAN_USBBUS1', 
+            interface='socketcan',
+            channel='can0', 
             bitrate=1000000,
             motor_ids=[1, 2, 3, 4, 5, 6],
             node_name='rh2_controller_node'

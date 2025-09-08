@@ -14,7 +14,7 @@ class RH2Controller:
     COMMAND_CTRL_MOTOR_POSITION = 0xAA
     COMMAND_READ_TACTILE_DATA = 0xB6
     
-    def __init__(self, interface: str = 'pcan', channel: str = 'PCAN_USBBUS1', 
+    def __init__(self, interface: str = 'socketcan', channel: str = 'can0', 
                  bitrate: int = 1000000, auto_connect: bool = True, 
                  motor_ids: List[int] = [1, 2, 3, 4, 5, 6]):
         self.interface = interface

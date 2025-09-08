@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 import logging
-from rh2_ros_wrapper import RH2ROSWrapper
+from .rh2_ros_wrapper import RH2ROSWrapper
 
 class RH2DualHandNode(Node):
     """
@@ -30,27 +30,27 @@ class RH2DualHandNode(Node):
         self.logger = self.get_logger()
         
         try:
-            # 创建右手控制器
+            # 创建右手控制器 (使用can0)
             self.right_hand = RH2ROSWrapper(
-                interface='pcan',
-                channel='PCAN_USBBUS1',
+                interface='socketcan',
+                channel='can0',
                 bitrate=1000000,
                 motor_ids=[1, 2, 3, 4, 5, 6],
                 hand_name='right',
                 node_name='rh2_right_hand'
             )
-            self.logger.info("右手控制器初始化成功")
+            self.logger.info("右手控制器初始化成功 (CAN0)")
             
-            # 创建左手控制器
+            # 创建左手控制器 (使用can1)
             self.left_hand = RH2ROSWrapper(
-                interface='pcan',
-                channel='PCAN_USBBUS2',
+                interface='socketcan',
+                channel='can1',
                 bitrate=1000000,
                 motor_ids=[1, 2, 3, 4, 5, 6],
                 hand_name='left',
                 node_name='rh2_left_hand'
             )
-            self.logger.info("左手控制器初始化成功")
+            self.logger.info("左手控制器初始化成功 (CAN1)")
             
         except Exception as e:
             self.logger.error(f"初始化双手控制器失败: {e}")
