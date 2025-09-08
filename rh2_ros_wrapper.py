@@ -41,8 +41,8 @@ class RH2ROSWrapper(Node):
     - 支持电机信息查询和运动控制
     
     Topics:
-    - /rh2/controller (订阅) - 接收控制指令
-    - /rh2/response (发布) - 发布响应数据
+    - /ry_hand/{hand_name}/set_angles (订阅) - 接收控制指令
+    - /ry_hand/{hand_name}/joint_states (发布) - 发布关节状态数据
     """
     
     def __init__(self, 
@@ -50,6 +50,7 @@ class RH2ROSWrapper(Node):
                  channel: str = 'PCAN_USBBUS1',
                  bitrate: int = 1000000,
                  motor_ids: List[int] = [1, 2, 3, 4, 5, 6],
+                 hand_name: str = 'right',
                  node_name: str = 'rh2_controller_node'):
         
         super().__init__(node_name)
@@ -78,16 +79,19 @@ class RH2ROSWrapper(Node):
             depth=10
         )
         
+        # 保存手的名称
+        self.hand_name = hand_name
+        
         # 创建发布者和订阅者
         self.response_publisher = self.create_publisher(
             JointState, 
-            '/rh2/response', 
+            f'/ry_hand/{self.hand_name}/joint_states', 
             qos_profile
         )
         
         self.command_subscriber = self.create_subscription(
             JointState,
-            '/rh2/controller',
+            f'/ry_hand/{self.hand_name}/set_angles',
             self.command_callback,
             qos_profile
         )
@@ -354,8 +358,8 @@ def main(args=None):
         
         print("RH2 ROS包装器已启动")
         print("Topics:")
-        print("  订阅: /rh2/controller (JointState)")
-        print("  发布: /rh2/response (JointState)")
+        print(f"  订阅: /ry_hand/{rh2_wrapper.hand_name}/set_angles (JointState)")
+        print(f"  发布: /ry_hand/{rh2_wrapper.hand_name}/joint_states (JointState)")
         print("按 Ctrl+C 退出")
         
         # 运行节点
